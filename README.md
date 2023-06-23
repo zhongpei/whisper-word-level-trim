@@ -1,5 +1,5 @@
 ---
-title: Edit Video By Editing Text
+title: "Whisper: Word-Level Video Trimming"
 emoji: ✍️🎥📄
 colorFrom: red
 colorTo: gray
@@ -10,4 +10,3 @@ pinned: false
 duplicated_from: radames/edit-video-by-editing-text
 ---
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces#reference
