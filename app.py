@@ -83,7 +83,7 @@ async def speech_to_text(video_in):
 
         words = [(word['word'], '+' if word['state'] else '-')
                  for word in timestamps_var]
-        return (words, transcription, timestamps_var, video_in.name)
+        return (words, timestamps_var, video_in.name)
     except Exception as e:
         raise RuntimeError("Error Running inference with local model", e)
 
@@ -120,8 +120,7 @@ async def cut_timestamps_to_video(video_in, timestamps_var):
 
 
 with gr.Blocks() as demo:
-    transcription_var = gr.State()
-    timestamps_var = gr.State()
+    timestamps_var = gr.JSON(visible=False)
     with gr.Row():
         with gr.Column():
             gr.Markdown("""
@@ -156,8 +155,7 @@ with gr.Blocks() as demo:
                       "./examples/zuckyuval.mp4",
                       "./examples/cooking.mp4"],
             inputs=[file_upload],
-            outputs=[text_in, transcription_var,
-                     timestamps_var, video_preview],
+            outputs=[text_in, timestamps_var, video_preview],
             cache_examples=True)
 
     with gr.Row():
@@ -190,7 +188,7 @@ with gr.Blocks() as demo:
         return timestamps_var, words
 
     file_upload.upload(speech_to_text, inputs=[file_upload], outputs=[
-        text_in, transcription_var, timestamps_var, video_preview])
+        text_in, timestamps_var, video_preview])
     select_all_words.click(words_selection, inputs=[timestamps_var], outputs=[
                            timestamps_var, text_in], queue=False, show_progress=False)
     reset_words.click(lambda x: words_selection(x, True), inputs=[timestamps_var], outputs=[
