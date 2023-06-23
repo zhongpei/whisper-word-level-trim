@@ -118,8 +118,13 @@ async def cut_timestamps_to_video(video_in, timestamps_var):
 
     return output_video
 
-
-with gr.Blocks() as demo:
+css = """
+#words-container {
+    max-height: 500px;
+    overflow-y: scroll !important;
+}
+"""
+with gr.Blocks(css=css) as demo:
     timestamps_var = gr.JSON(visible=False)
     with gr.Row():
         with gr.Column():
@@ -142,7 +147,7 @@ with gr.Blocks() as demo:
 
         with gr.Column():
             text_in = gr.HighlightedText(
-                label="Transcription", combine_adjacent=False, show_legend=True, color_map={"+": "green", "-": "red"})
+                label="Transcription", combine_adjacent=False, show_legend=True, color_map={"+": "green", "-": "red"}, elem_id="words-container")
             with gr.Row():
                 cut_btn = gr.Button("Cut Video")
                 select_all_words = gr.Button("Select All Words")
