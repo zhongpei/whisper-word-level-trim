@@ -1,0 +1,8 @@
+torch
+transformers
+gradio==3.35.2
+datasets
+librosa
+ffmpeg-python
+python-dotenv
+aiohttp
