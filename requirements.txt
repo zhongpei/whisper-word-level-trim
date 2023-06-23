@@ -1,6 +1,12 @@
+git+https://github.com/huggingface/transformers.git
 torch
-transformers
-gradio==3.35.2
+torchaudio
+soundfile
+librosa
+moviepy
+matplotlib
+pillow
+gradio
 datasets
 librosa
 ffmpeg-python

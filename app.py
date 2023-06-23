@@ -1,45 +1,46 @@
 import gradio as gr
 import json
-from difflib import Differ
 import ffmpeg
 import os
 from pathlib import Path
 import time
-import aiohttp
-import asyncio
+from transformers import pipeline
+import torch
 
+# checkpoint = "openai/whisper-tiny"
+# checkpoint = "openai/whisper-base"
+checkpoint = "openai/whisper-small"
 
-# Set true if you're using huggingface inference API API https://huggingface.co/inference-api
-API_BACKEND = True
-# MODEL = 'facebook/wav2vec2-large-960h-lv60-self'
-# MODEL  = "facebook/wav2vec2-large-960h"
-MODEL = "facebook/wav2vec2-base-960h"
-# MODEL = "patrickvonplaten/wav2vec2-large-960h-lv60-self-4-gram"
-if API_BACKEND:
-    from dotenv import load_dotenv
-    import base64
-    import asyncio
-    load_dotenv(Path(".env"))
-
-    HF_TOKEN = os.environ["HF_TOKEN"]
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    API_URL = f'https://api-inference.huggingface.co/models/{MODEL}'
-
-else:
-    import torch
-    from transformers import pipeline
-
-    # is cuda available?
-    cuda = torch.device(
-        'cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-    device = 0 if torch.cuda.is_available() else -1
-    speech_recognizer = pipeline(
-        task="automatic-speech-recognition",
-        model=f'{MODEL}',
-        tokenizer=f'{MODEL}',
-        framework="pt",
-        device=device,
+if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+    from transformers import (
+        AutomaticSpeechRecognitionPipeline,
+        WhisperForConditionalGeneration,
+        WhisperProcessor,
     )
+    model = WhisperForConditionalGeneration.from_pretrained(
+        checkpoint).to("cuda").half()
+    processor = WhisperProcessor.from_pretrained(checkpoint)
+    pipe = AutomaticSpeechRecognitionPipeline(
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        batch_size=8,
+        torch_dtype=torch.float16,
+        device="cuda:0"
+    )
+else:
+    pipe = pipeline(model=checkpoint)
+
+
+# TODO: no longer need to set these manually once the models have been updated on the Hub
+# whisper-tiny
+# pipe.model.generation_config.alignment_heads = [[2, 2], [3, 0], [3, 2], [3, 3], [3, 4], [3, 5]]
+# whisper-base
+# pipe.model.generation_config.alignment_heads = [[3, 1], [4, 2], [4, 3], [4, 7], [5, 1], [5, 2], [5, 4], [5, 6]]
+# whisper-small
+pipe.model.generation_config.alignment_heads = [[5, 3], [5, 9], [
+    8, 0], [8, 4], [8, 7], [8, 8], [9, 0], [9, 7], [9, 9], [10, 5]]
+
 
 videos_out_path = Path("./videos_out")
 videos_out_path.mkdir(parents=True, exist_ok=True)
@@ -52,124 +53,58 @@ for file in samples_data:
     SAMPLES.append(sample)
 VIDEOS = list(map(lambda x: [x['video']], SAMPLES))
 
-total_inferences_since_reboot = 415
-total_cuts_since_reboot = 1539
 
-
-async def speech_to_text(video_file_path):
+async def speech_to_text(video_in):
     """
     Takes a video path to convert to audio, transcribe audio channel to text and char timestamps
 
     Using https://huggingface.co/tasks/automatic-speech-recognition pipeline
     """
-    global total_inferences_since_reboot
-    if (video_file_path == None):
-        raise ValueError("Error no video input")
+    video_in = video_in[0] if isinstance(video_in, list) else video_in
+    if (video_in == None):
+        raise ValueError("Video input undefined")
 
-    video_path = Path(video_file_path)
+    video_path = Path(video_in.name)
     try:
         # convert video to audio 16k using PIPE to audio_memory
         audio_memory, _ = ffmpeg.input(video_path).output(
-            '-', format="wav", ac=1, ar='16k').overwrite_output().global_args('-loglevel', 'quiet').run(capture_stdout=True)
+            '-', format="wav", ac=1, ar=pipe.feature_extractor.sampling_rate).overwrite_output().global_args('-loglevel', 'quiet').run(capture_stdout=True)
     except Exception as e:
         raise RuntimeError("Error converting video to audio")
 
-    ping("speech_to_text")
-    last_time = time.time()
-    if API_BACKEND:
-        # Using Inference API https://huggingface.co/inference-api
-        # try twice, because the model must be loaded
-        for i in range(10):
-            for tries in range(4):
-                print(f'Transcribing from API attempt {tries}')
-                try:
-                    inference_reponse = await query_api(audio_memory)
-                    print(inference_reponse)
-                    transcription = inference_reponse["text"].lower()
-                    timestamps = [[chunk["text"].lower(), chunk["timestamp"][0], chunk["timestamp"][1]]
-                                  for chunk in inference_reponse['chunks']]
+    try:
+        print(f'Transcribing via local model')
+        output = pipe(audio_memory, chunk_length_s=10,
+                      stride_length_s=[4, 2], return_timestamps="word")
+        transcription = output["text"]
+        chunks = output["chunks"]
+        timestamps_var = [{"word": chunk["text"], "timestamp":(
+            chunk["timestamp"][0], chunk["timestamp"][1]), "state": True} for chunk in chunks]
 
-                    total_inferences_since_reboot += 1
-                    print("\n\ntotal_inferences_since_reboot: ",
-                          total_inferences_since_reboot, "\n\n")
-                    return (transcription, transcription, timestamps)
-                except Exception as e:
-                    print(e)
-                    if 'error' in inference_reponse and 'estimated_time' in inference_reponse:
-                        wait_time = inference_reponse['estimated_time']
-                        print("Waiting for model to load....", wait_time)
-                        # wait for loading model
-                        # 5 seconds plus for certanty
-                        await asyncio.sleep(wait_time + 5.0)
-                    elif 'error' in inference_reponse:
-                        raise RuntimeError("Error Fetching API",
-                                           inference_reponse['error'])
-                    else:
-                        break
-            else:
-                raise RuntimeError(inference_reponse, "Error Fetching API")
-    else:
-
-        try:
-            print(f'Transcribing via local model')
-            output = speech_recognizer(
-                audio_memory, return_timestamps="char",  chunk_length_s=10, stride_length_s=(4, 2))
-
-            transcription = output["text"].lower()
-            timestamps = [[chunk["text"].lower(), chunk["timestamp"][0].tolist(), chunk["timestamp"][1].tolist()]
-                          for chunk in output['chunks']]
-            total_inferences_since_reboot += 1
-
-            print("\n\ntotal_inferences_since_reboot: ",
-                  total_inferences_since_reboot, "\n\n")
-            return (transcription, transcription, timestamps)
-        except Exception as e:
-            raise RuntimeError("Error Running inference with local model", e)
+        words = [(word['word'], '+' if word['state'] else '-')
+                 for word in timestamps_var]
+        return (words, transcription, timestamps_var, video_in.name)
+    except Exception as e:
+        raise RuntimeError("Error Running inference with local model", e)
 
 
-async def cut_timestamps_to_video(video_in, transcription, text_in, timestamps):
-    """
-    Given original video input, text transcript + timestamps,
-    and edit ext cuts video segments into a single video
-    """
-    global total_cuts_since_reboot
-
-    video_path = Path(video_in)
-    video_file_name = video_path.stem
-    if (video_in == None or text_in == None or transcription == None):
+async def cut_timestamps_to_video(video_in, timestamps_var):
+    video_in = video_in[0] if isinstance(video_in, list) else video_in
+    if (video_in == None or timestamps_var == None):
         raise ValueError("Inputs undefined")
 
-    d = Differ()
-    # compare original transcription with edit text
-    diff_chars = d.compare(transcription, text_in)
-    # remove all text aditions from diff
-    filtered = list(filter(lambda x: x[0] != '+', diff_chars))
+    video_path = Path(video_in.name)
+    video_file_name = video_path.stem
 
-    # filter timestamps to be removed
-    # timestamps_to_cut = [b for (a,b) in zip(filtered, timestamps_var) if a[0]== '-' ]
-    # return diff tokes and cutted video!!
-
-    # groupping character timestamps so there are less cuts
-    idx = 0
-    grouped = {}
-    for (a, b) in zip(filtered, timestamps):
-        if a[0] != '-':
-            if idx in grouped:
-                grouped[idx].append(b)
-            else:
-                grouped[idx] = []
-                grouped[idx].append(b)
-        else:
-            idx += 1
-
-    # after grouping, gets the lower and upter start and time for each group
-    timestamps_to_cut = [[v[0][1], v[-1][2]] for v in grouped.values()]
+    timestamps_to_cut = [
+        (timestamps_var[i]['timestamp'][0], timestamps_var[i]['timestamp'][1])
+        for i in range(len(timestamps_var)) if timestamps_var[i]['state']]
 
     between_str = '+'.join(
         map(lambda t: f'between(t,{t[0]},{t[1]})', timestamps_to_cut))
 
     if timestamps_to_cut:
-        video_file = ffmpeg.input(video_in)
+        video_file = ffmpeg.input(video_path)
         video = video_file.video.filter(
             "select", f'({between_str})').filter("setpts", "N/FRAME_RATE/TB")
         audio = video_file.audio.filter(
@@ -179,124 +114,52 @@ async def cut_timestamps_to_video(video_in, transcription, text_in, timestamps):
         ffmpeg.concat(video, audio, v=1, a=1).output(
             output_video).overwrite_output().global_args('-loglevel', 'quiet').run()
     else:
-        output_video = video_in
+        output_video = video_path
 
-    tokens = [(token[2:], token[0] if token[0] != " " else None)
-              for token in filtered]
-
-    total_cuts_since_reboot += 1
-    ping("video_cuts")
-    print("\n\ntotal_cuts_since_reboot: ", total_cuts_since_reboot, "\n\n")
-    return (tokens, output_video)
+    return output_video
 
 
-async def query_api(audio_bytes: bytes):
-    """
-    Query for Huggingface Inference API for Automatic Speech Recognition task
-    """
-    payload = json.dumps({
-        "inputs": base64.b64encode(audio_bytes).decode("utf-8"),
-        "parameters": {
-            "return_timestamps": "char",
-            "chunk_length_s": 10,
-            "stride_length_s": [4, 2]
-        },
-        "options": {"use_gpu": False}
-    }).encode("utf-8")
-    async with aiohttp.ClientSession() as session:
-        async with session.post(API_URL, headers=headers, data=payload) as response:
-            print("API Response: ", response.status)
-            if response.headers['Content-Type'] == 'application/json':
-                return await response.json()
-            elif response.headers['Content-Type'] == 'application/octet-stream':
-                return await response.read()
-            elif response.headers['Content-Type'] == 'text/plain':
-                return await response.text()
-            else:
-                raise RuntimeError("Error Fetching API")
-
-
-def ping(name):
-    url = f'https://huggingface.co/api/telemetry/spaces/radames/edit-video-by-editing-text/{name}'
-    print("ping: ", url)
-
-    async def req():
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                print("pong: ", response.status)
-    asyncio.create_task(req())
-
-
-# ---- Gradio Layout -----
-video_in = gr.Video(label="Video file")
-text_in = gr.Textbox(label="Transcription", lines=10, interactive=True)
-video_out = gr.Video(label="Video Out")
-diff_out = gr.HighlightedText(label="Cuts Diffs", combine_adjacent=True)
-examples = gr.Dataset(components=[video_in], samples=VIDEOS, type="index")
-
-css = """
-#cut_btn, #reset_btn { align-self:stretch; }
-#\\31 3 { max-width: 540px; }
-.output-markdown {max-width: 65ch !important;}
-"""
-with gr.Blocks(css=css) as demo:
-    transcription_var = gr.Variable()
-    timestamps_var = gr.Variable()
+with gr.Blocks() as demo:
+    transcription_var = gr.State()
+    timestamps_var = gr.State()
     with gr.Row():
         with gr.Column():
             gr.Markdown("""
-            # Edit Video By Editing Text
-            This project is a quick proof of concept of a simple video editor where the edits
-            are made by editing the audio transcription.
+            # Whisper: Word-Level Video Trimming
+            Quick edit a video by trimming out words.
             Using the [Huggingface Automatic Speech Recognition Pipeline](https://huggingface.co/tasks/automatic-speech-recognition)
-            with a fine tuned [Wav2Vec2 model using Connectionist Temporal Classification (CTC)](https://huggingface.co/facebook/wav2vec2-large-960h-lv60-self)
-            you can predict not only the text transcription but also the [character or word base timestamps](https://huggingface.co/docs/transformers/v4.19.2/en/main_classes/pipelines#transformers.AutomaticSpeechRecognitionPipeline.__call__.return_timestamps)
+            with [Whisper](https://huggingface.co/docs/transformers/model_doc/whisper)
             """)
 
     with gr.Row():
-
-        examples.render()
-
-        def load_example(id):
-            video = SAMPLES[id]['video']
-            transcription = SAMPLES[id]['transcription'].lower()
-            timestamps = SAMPLES[id]['timestamps']
-
-            return (video, transcription, transcription, timestamps)
-
-        examples.click(
-            load_example,
-            inputs=[examples],
-            outputs=[video_in, text_in, transcription_var, timestamps_var],
-            queue=False)
-    with gr.Row():
         with gr.Column():
-            video_in.render()
-            transcribe_btn = gr.Button("Transcribe Audio")
-            transcribe_btn.click(speech_to_text, [video_in], [
-                text_in, transcription_var, timestamps_var])
+            file_upload = gr.File(
+                label="Upload Video File", file_count=1, scale=1)
+            video_preview = gr.Video(
+                label="Video Preview", scale=3, intervactive=False)
+            # with gr.Row():
+            #     transcribe_btn = gr.Button(
+            #         "Transcribe Audio")
 
-    with gr.Row():
-        gr.Markdown("""
-        ### Now edit as text
-        After running the video transcription, you can make cuts to the text below (only cuts, not additions!)""")
-
-    with gr.Row():
         with gr.Column():
-            text_in.render()
+            text_in = gr.HighlightedText(
+                label="Transcription", combine_adjacent=False, show_legend=True, color_map={"+": "green", "-": "red"})
             with gr.Row():
-                cut_btn = gr.Button("Cut to video", elem_id="cut_btn")
-                # send audio path and hidden variables
-                cut_btn.click(cut_timestamps_to_video, [
-                    video_in, transcription_var, text_in, timestamps_var], [diff_out, video_out])
+                cut_btn = gr.Button("Cut Video")
+                select_all_words = gr.Button("Select All Words")
+                reset_words = gr.Button("Reset Words")
+            video_out = gr.Video(label="Video Out")
+    with gr.Row():
+        gr.Examples(
+            fn=speech_to_text,
+            examples=["./examples/ShiaLaBeouf.mp4",
+                      "./examples/zuckyuval.mp4",
+                      "./examples/cooking.mp4"],
+            inputs=[file_upload],
+            outputs=[text_in, transcription_var,
+                     timestamps_var, video_preview],
+            cache_examples=True)
 
-                reset_transcription = gr.Button(
-                    "Reset to last trascription", elem_id="reset_btn")
-                reset_transcription.click(
-                    lambda x: x, transcription_var, text_in)
-        with gr.Column():
-            video_out.render()
-            diff_out.render()
     with gr.Row():
         gr.Markdown("""
         #### Video Credits
@@ -305,6 +168,40 @@ with gr.Blocks(css=css) as demo:
         1. [Shia LaBeouf "Just Do It"](https://www.youtube.com/watch?v=n2lTxIk_Dr0)
         1. [Mark Zuckerberg & Yuval Noah Harari in Conversation](https://www.youtube.com/watch?v=Boj9eD0Wug8)
         """)
+
+    def select_text(evt: gr.SelectData, timestamps_var):
+        index = evt.index
+        timestamps_var[index]['state'] = not timestamps_var[index]['state']
+        words = [(word['word'], '+' if word['state'] else '-')
+                 for word in timestamps_var]
+        return timestamps_var, words
+
+    def words_selection(timestamps_var, reset=False):
+        if reset:
+            for word in timestamps_var:
+                word['state'] = True
+        else:
+            # reverse the state of all words
+            for word in timestamps_var:
+                word['state'] = False
+
+        words = [(word['word'], '+' if word['state'] else '-')
+                 for word in timestamps_var]
+        return timestamps_var, words
+
+    file_upload.upload(speech_to_text, inputs=[file_upload], outputs=[
+        text_in, transcription_var, timestamps_var, video_preview])
+    select_all_words.click(words_selection, inputs=[timestamps_var], outputs=[
+                           timestamps_var, text_in], queue=False, show_progress=False)
+    reset_words.click(lambda x: words_selection(x, True), inputs=[timestamps_var], outputs=[
+                      timestamps_var, text_in], queue=False, show_progress=False)
+    text_in.select(select_text, inputs=timestamps_var,
+                   outputs=[timestamps_var, text_in], queue=False, show_progress=False)
+    # transcribe_btn.click(speech_to_text, inputs=[file_upload], outputs=[
+    #                      text_in, transcription_var, timestamps_var, video_preview])
+    cut_btn.click(cut_timestamps_to_video, [
+                  file_upload, timestamps_var], [video_out])
+
 demo.queue()
 if __name__ == "__main__":
     demo.launch(debug=True)
