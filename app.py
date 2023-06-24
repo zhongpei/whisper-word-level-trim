@@ -120,7 +120,7 @@ async def cut_timestamps_to_video(video_in, timestamps_var):
 
 css = """
 #words-container {
-    max-height: 500px;
+    max-height: 400px;
     overflow-y: scroll !important;
 }
 """
