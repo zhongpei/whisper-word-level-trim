@@ -185,14 +185,7 @@ with gr.Blocks(css=css) as demo:
                 reset_words = gr.Button("Reset Words")
             video_out = gr.Video(label="Video Out")
 
-    with gr.Row():
-        gr.Markdown("""
-        #### Video Credits
 
-        1. [Cooking](https://vimeo.com/573792389)
-        1. [Shia LaBeouf "Just Do It"](https://www.youtube.com/watch?v=n2lTxIk_Dr0)
-        1. [Mark Zuckerberg & Yuval Noah Harari in Conversation](https://www.youtube.com/watch?v=Boj9eD0Wug8)
-        """)
 
 
     def select_text(evt: gr.SelectData, timestamps_var):
